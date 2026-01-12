@@ -9,6 +9,8 @@ import {
   Query,
   BadRequestException,
   UnauthorizedException,
+  Req,
+  Ip,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -16,6 +18,7 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { AuthService } from './auth.service';
 import { SsoService } from './sso.service';
 import { RegisterDto } from './dto/register.dto';
@@ -25,10 +28,16 @@ import { AuthResponseDto } from './dto/auth-response.dto';
 import { SsoInitiateDto } from './dto/sso-initiate.dto';
 import { SsoSessionDto } from './dto/sso-response.dto';
 import { TokenValidationResponseDto } from './dto/token-validation-response.dto';
+import {
+  AuthorizeCompleteDto,
+  TokenExchangeDto,
+  AuthorizationCodeResponseDto,
+  TokenResponseDto,
+} from './dto/pkce.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { User } from '../users/entities/user.entity';
+import type { User } from '../users/entities/user.entity';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -132,9 +141,9 @@ export class AuthController {
   @Get('sso')
   @Public()
   @ApiOperation({
-    summary: 'Initiate SSO flow',
+    summary: 'Initiate SSO flow (OAuth 2.1 with PKCE)',
     description:
-      'Child project initiates SSO authentication by providing project slug, API key, and return URL. Creates a session and returns session ID.',
+      'Child project initiates SSO authentication by providing project slug, API key, return URL, PKCE challenge, and state. Creates a session and returns session ID.',
   })
   @ApiResponse({
     status: 200,
@@ -150,18 +159,40 @@ export class AuthController {
     status: 401,
     description: 'Invalid API key or project not found',
   })
-  @ApiResponse({ status: 400, description: 'Invalid return URL' })
-  async initiateSso(@Query() ssoInitiateDto: SsoInitiateDto) {
+  @ApiResponse({ status: 400, description: 'Invalid return URL or PKCE parameters' })
+  async initiateSso(
+    @Query() ssoInitiateDto: SsoInitiateDto,
+    @Ip() ipAddress: string,
+    @Req() req: Request,
+  ) {
     try {
-      const { project, apiKey, returnUrl, state } = ssoInitiateDto;
+      const { project, apiKey, returnUrl, state, codeChallenge, codeChallengeMethod } =
+        ssoInitiateDto;
+      const userAgent = req.get('user-agent');
 
-      await this.ssoService.validateProjectCredentials(project, apiKey);
-      await this.ssoService.validateReturnUrl(project, returnUrl);
+      await this.ssoService.validateProjectCredentials(
+        project,
+        apiKey,
+        ipAddress,
+        userAgent,
+      );
+      
+      await this.ssoService.validateReturnUrl(
+        project,
+        returnUrl,
+        undefined,
+        ipAddress,
+        userAgent,
+      );
 
       const sessionId = await this.ssoService.generateSSOSession(
         project,
         returnUrl,
         state,
+        codeChallenge,
+        codeChallengeMethod,
+        ipAddress,
+        userAgent,
       );
 
       return {
@@ -202,42 +233,32 @@ export class AuthController {
     return session;
   }
 
-  @Post('sso/complete')
+  @Post('sso/authorize')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Complete SSO authentication',
+    summary: 'Authorize SSO session and generate authorization code',
     description:
-      'User confirms SSO login. Generates tokens and returns redirect URL with tokens for child project.',
+      'User confirms SSO login. Generates single-use authorization code (60s TTL) with PKCE challenge stored.',
   })
   @ApiResponse({
     status: 200,
-    description: 'SSO authentication completed, redirect URL generated',
-    schema: {
-      example: {
-        redirectUrl: 'https://remixer.theaisurfer.com/auth/callback',
-        tokens: {
-          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
-          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
-          user: {
-            id: 'uuid',
-            email: 'user@example.com',
-            firstName: 'John',
-            lastName: 'Doe',
-          },
-          state: 'csrf_token',
-        },
-      },
-    },
+    description: 'Authorization code generated',
+    type: AuthorizationCodeResponseDto,
   })
   @ApiResponse({ status: 401, description: 'User not authenticated' })
   @ApiResponse({ status: 400, description: 'Invalid or expired SSO session' })
-  async completeSso(
+  async authorizeSso(
     @CurrentUser() user: User,
-    @Body('sessionId') sessionId: string,
-  ) {
+    @Body() authorizeDto: AuthorizeCompleteDto,
+    @Ip() ipAddress: string,
+    @Req() req: Request,
+  ): Promise<AuthorizationCodeResponseDto> {
     try {
+      const { sessionId } = authorizeDto;
+      const userAgent = req.get('user-agent');
+
       if (!sessionId) {
         throw new BadRequestException('Session ID is required');
       }
@@ -247,18 +268,75 @@ export class AuthController {
       }
 
       console.log(
-        `[SSO] Completing SSO auth for user ${user.email}, session ${sessionId}`,
+        `[SSO] Authorizing SSO for user ${user.email}, session ${sessionId}`,
       );
 
-      const result = await this.ssoService.completeSSOAuth(user, sessionId);
+      const result = await this.ssoService.authorizeSession(
+        user,
+        sessionId,
+        ipAddress,
+        userAgent,
+      );
 
       console.log(
-        `[SSO] SSO auth completed successfully for user ${user.email}`,
+        `[SSO] Authorization code generated for user ${user.email}`,
       );
 
       return result;
     } catch (error) {
-      console.error('[SSO] Failed to complete SSO auth:', error);
+      console.error('[SSO] Failed to authorize SSO:', error);
+      throw error;
+    }
+  }
+
+  @Post('sso/token')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Exchange authorization code for tokens (backend-to-backend)',
+    description:
+      'Child backend exchanges authorization code + PKCE verifier for access and refresh tokens. Code is single-use and expires in 60 seconds.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Tokens issued successfully',
+    type: TokenResponseDto,
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid code, verifier, or code already used/expired',
+  })
+  async exchangeToken(
+    @Body() tokenExchangeDto: TokenExchangeDto,
+    @Ip() ipAddress: string,
+    @Req() req: Request,
+  ): Promise<TokenResponseDto> {
+    try {
+      const { code, codeVerifier, projectSlug, apiKey, redirectUri } =
+        tokenExchangeDto;
+      const userAgent = req.get('user-agent');
+
+      await this.ssoService.validateProjectCredentials(
+        projectSlug,
+        apiKey,
+        ipAddress,
+        userAgent,
+      );
+
+      const tokens = await this.ssoService.exchangeCodeForTokens(
+        code,
+        codeVerifier,
+        projectSlug,
+        redirectUri,
+        ipAddress,
+        userAgent,
+      );
+
+      console.log(`[SSO] Token exchange successful for project ${projectSlug}`);
+
+      return tokens;
+    } catch (error) {
+      console.error('[SSO] Token exchange failed:', error);
       throw error;
     }
   }

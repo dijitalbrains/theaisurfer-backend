@@ -7,34 +7,45 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository, LessThan, DataSource } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ProjectsService } from '../projects/projects.service';
 import { User } from '../users/entities/user.entity';
 import { SsoSession } from './entities/sso-session.entity';
+import { AuthorizationCode } from './entities/authorization-code.entity';
+import { RefreshToken } from './entities/refresh-token.entity';
+import { SsoSessionDto } from './dto/sso-response.dto';
 import {
-  SsoResponseDto,
-  SsoUserDto,
-  SsoSessionDto,
-} from './dto/sso-response.dto';
+  AuthorizationCodeResponseDto,
+  TokenResponseDto,
+} from './dto/pkce.dto';
+import { PkceService } from './pkce.service';
+import { AuditService } from './audit.service';
 import * as crypto from 'crypto';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class SsoService {
   constructor(
     @InjectRepository(SsoSession)
     private readonly ssoSessionRepository: Repository<SsoSession>,
+    @InjectRepository(AuthorizationCode)
+    private readonly authCodeRepository: Repository<AuthorizationCode>,
+    @InjectRepository(RefreshToken)
+    private readonly refreshTokenRepository: Repository<RefreshToken>,
     private readonly projectsService: ProjectsService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly pkceService: PkceService,
+    private readonly auditService: AuditService,
+    private readonly dataSource: DataSource,
   ) {}
 
-  /**
-   * Validate project credentials (slug + API key)
-   */
   async validateProjectCredentials(
     projectSlug: string,
     apiKey: string,
+    ipAddress?: string,
+    userAgent?: string,
   ): Promise<boolean> {
     const project = await this.projectsService.findBySlug(projectSlug);
 
@@ -52,25 +63,29 @@ export class SsoService {
       );
     }
 
-    // Constant-time comparison to prevent timing attacks
     const isValid = crypto.timingSafeEqual(
       Buffer.from(project.apiKey),
       Buffer.from(apiKey),
     );
 
     if (!isValid) {
+      await this.auditService.logInvalidApiKey(
+        project.id,
+        ipAddress,
+        userAgent,
+      );
       throw new UnauthorizedException('Invalid API key');
     }
 
     return true;
   }
 
-  /**
-   * Validate return URL against project's allowed redirect URLs
-   */
   async validateReturnUrl(
     projectSlug: string,
     returnUrl: string,
+    sessionId?: string,
+    ipAddress?: string,
+    userAgent?: string,
   ): Promise<boolean> {
     const project = await this.projectsService.findBySlug(projectSlug);
 
@@ -103,19 +118,26 @@ export class SsoService {
         }
 
         if (allowedUrlObj.pathname === '/' || allowedUrlObj.pathname === '') {
-          return true;
+          return returnUrlObj.pathname.startsWith('/');
         }
 
-        return (
-          returnUrlObj.pathname === allowedUrlObj.pathname ||
-          returnUrlObj.pathname.startsWith(allowedUrlObj.pathname)
-        );
+        return returnUrlObj.pathname === allowedUrlObj.pathname;
       } catch {
         return returnUrl === allowedUrl;
       }
     });
 
     if (!isAllowed) {
+      await this.auditService.logInvalidRedirectUrl(
+        project.id,
+        sessionId || '',
+        {
+          attemptedUrl: returnUrl,
+          allowedUrls: project.allowedRedirectUrls,
+        },
+        ipAddress,
+        userAgent,
+      );
       throw new BadRequestException(
         `Return URL '${returnUrl}' is not whitelisted for project '${projectSlug}'`,
       );
@@ -124,13 +146,14 @@ export class SsoService {
     return true;
   }
 
-  /**
-   * Generate SSO session for the authentication flow
-   */
   async generateSSOSession(
     projectSlug: string,
     returnUrl: string,
-    state?: string,
+    state: string,
+    codeChallenge: string,
+    codeChallengeMethod: string,
+    ipAddress?: string,
+    userAgent?: string,
   ): Promise<string> {
     const project = await this.projectsService.findBySlug(projectSlug);
 
@@ -149,18 +172,26 @@ export class SsoService {
       projectName: project.name,
       returnUrl,
       state,
+      codeChallenge,
+      codeChallengeMethod,
       expiresAt,
       isConsumed: false,
+      ipAddress,
+      userAgent,
     });
 
     await this.ssoSessionRepository.save(session);
 
+    await this.auditService.logSsoInitiated(
+      project.id,
+      sessionId,
+      ipAddress,
+      userAgent,
+    );
+
     return sessionId;
   }
 
-  /**
-   * Get SSO session data
-   */
   async getSSOSession(sessionId: string): Promise<SsoSessionDto | null> {
     const session = await this.ssoSessionRepository.findOne({
       where: { id: sessionId },
@@ -189,66 +220,304 @@ export class SsoService {
     };
   }
 
-  /**
-   * Complete SSO authentication and generate tokens
-   */
-  async completeSSOAuth(
+  async authorizeSession(
     user: User,
     sessionId: string,
-  ): Promise<{ redirectUrl: string; tokens: SsoResponseDto }> {
-    const session = await this.getSSOSession(sessionId);
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<AuthorizationCodeResponseDto> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction('SERIALIZABLE');
 
-    if (!session) {
-      throw new BadRequestException('Invalid or expired SSO session');
+    try {
+      const session = await queryRunner.manager.findOne(SsoSession, {
+        where: { id: sessionId },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!session) {
+        throw new BadRequestException('Invalid or expired SSO session');
+      }
+
+      if (session.expiresAt < new Date()) {
+        throw new BadRequestException('SSO session expired');
+      }
+
+      if (session.isConsumed) {
+        throw new BadRequestException('SSO session already consumed');
+      }
+
+      session.userId = user.id;
+      session.isConsumed = true;
+      session.consumedAt = new Date();
+      await queryRunner.manager.save(session);
+
+      const code = this.pkceService.generateAuthorizationCode();
+      const codeExpiresAt = new Date();
+      codeExpiresAt.setSeconds(codeExpiresAt.getSeconds() + 60);
+
+      const authCode = queryRunner.manager.create(AuthorizationCode, {
+        code,
+        sessionId: session.id,
+        userId: user.id,
+        projectId: session.projectId,
+        codeChallenge: session.codeChallenge,
+        codeChallengeMethod: session.codeChallengeMethod,
+        redirectUri: session.returnUrl,
+        state: session.state,
+        expiresAt: codeExpiresAt,
+        isUsed: false,
+        ipAddress,
+        userAgent,
+      });
+
+      await queryRunner.manager.save(authCode);
+
+      await queryRunner.commitTransaction();
+
+      await this.auditService.logSsoAuthorized(
+        user.id,
+        session.projectId,
+        sessionId,
+        ipAddress,
+        userAgent,
+      );
+
+      await this.auditService.logCodeGenerated(
+        user.id,
+        session.projectId,
+        sessionId,
+        code,
+        ipAddress,
+        userAgent,
+      );
+
+      return {
+        code,
+        state: session.state,
+        redirectUri: session.returnUrl,
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
     }
+  }
 
-    await this.ssoSessionRepository.update(sessionId, { isConsumed: true });
+  async exchangeCodeForTokens(
+    code: string,
+    codeVerifier: string,
+    projectSlug: string,
+    redirectUri: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<TokenResponseDto> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction('SERIALIZABLE');
 
-    // Generate JWT tokens with audience claim
-    const payload = {
-      sub: user.id,
-      email: user.email,
-      projectSlug: session.projectSlug,
-      aud: session.projectSlug,
-      type: 'access',
-    };
+    try {
+      const authCode = await queryRunner.manager.findOne(AuthorizationCode, {
+        where: { code },
+        relations: ['user', 'project'],
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.configService.get('JWT_SECRET'),
-      expiresIn: this.configService.get('JWT_ACCESS_EXPIRATION') || '15m',
+      if (!authCode) {
+        await this.auditService.logCodeExchangeFailed(
+          projectSlug,
+          code,
+          'Authorization code not found',
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Invalid authorization code');
+      }
+
+      if (authCode.isUsed) {
+        await this.auditService.logCodeReplayDetected(
+          authCode.projectId,
+          code,
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Authorization code already used');
+      }
+
+      if (authCode.expiresAt < new Date()) {
+        await this.auditService.logCodeExchangeFailed(
+          authCode.projectId,
+          code,
+          'Authorization code expired',
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Authorization code expired');
+      }
+
+      if (authCode.project.slug !== projectSlug) {
+        await this.auditService.logCodeExchangeFailed(
+          authCode.projectId,
+          code,
+          'Project slug mismatch',
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Invalid project');
+      }
+
+      if (authCode.redirectUri !== redirectUri) {
+        await this.auditService.logCodeExchangeFailed(
+          authCode.projectId,
+          code,
+          'Redirect URI mismatch',
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Redirect URI mismatch');
+      }
+
+      const isPkceValid = this.pkceService.validateCodeChallenge(
+        codeVerifier,
+        authCode.codeChallenge,
+        authCode.codeChallengeMethod,
+      );
+
+      if (!isPkceValid) {
+        await this.auditService.logPkceValidationFailed(
+          authCode.projectId,
+          code,
+          ipAddress,
+          userAgent,
+        );
+        throw new UnauthorizedException('Invalid code verifier');
+      }
+
+      authCode.isUsed = true;
+      authCode.usedAt = new Date();
+      await queryRunner.manager.save(authCode);
+
+      const accessTokenPayload = {
+        sub: authCode.user.id,
+        email: authCode.user.email,
+        projectSlug: authCode.project.slug,
+        aud: authCode.project.slug,
+        type: 'access',
+      };
+
+      const accessToken = this.jwtService.sign(accessTokenPayload, {
+        secret: this.configService.get('JWT_SECRET'),
+        expiresIn: this.configService.get('JWT_ACCESS_EXPIRATION') || '15m',
+      });
+
+      const refreshTokenData = await this.generateSsoRefreshToken(
+        authCode.user.id,
+        authCode.project.id,
+        authCode.project.slug,
+        authCode.sessionId,
+        queryRunner,
+      );
+
+      await queryRunner.commitTransaction();
+
+      await this.auditService.logCodeExchanged(
+        authCode.user.id,
+        authCode.projectId,
+        code,
+        ipAddress,
+        userAgent,
+      );
+
+      const expiresIn = this.parseExpirationTime(
+        this.configService.get('JWT_ACCESS_EXPIRATION') || '15m',
+      );
+
+      return {
+        accessToken,
+        refreshToken: refreshTokenData.token,
+        tokenType: 'bearer',
+        expiresIn,
+        user: {
+          id: authCode.user.id,
+          email: authCode.user.email,
+          firstName: authCode.user.firstName,
+          lastName: authCode.user.lastName,
+        },
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private async generateSsoRefreshToken(
+    userId: string,
+    projectId: string,
+    projectSlug: string,
+    ssoSessionId: string,
+    queryRunner: any,
+  ): Promise<{ token: string; tokenId: string }> {
+    const expirationStr = this.configService.get('JWT_REFRESH_EXPIRATION');
+    const expiresAt = this.calculateExpirationDate(expirationStr);
+
+    const refreshTokenEntity = queryRunner.manager.create(RefreshToken, {
+      userId,
+      projectId,
+      projectSlug,
+      ssoSessionId,
+      expiresAt,
+      token: '',
     });
 
-    const refreshPayload = {
-      sub: user.id,
-      email: user.email,
-      projectSlug: session.projectSlug,
-      aud: session.projectSlug,
+    const savedToken = await queryRunner.manager.save(refreshTokenEntity);
+
+    const refreshTokenPayload = {
+      sub: userId,
+      tokenId: savedToken.id,
+      projectSlug,
+      aud: projectSlug,
       type: 'refresh',
     };
 
-    const refreshToken = this.jwtService.sign(refreshPayload, {
+    const refreshToken = this.jwtService.sign(refreshTokenPayload, {
       secret: this.configService.get('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get('JWT_REFRESH_EXPIRATION') || '7d',
+      expiresIn: expirationStr,
     });
 
-    const userDto: SsoUserDto = {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-    };
+    const hashedToken = await bcrypt.hash(refreshToken, 10);
+    savedToken.token = hashedToken;
+    await queryRunner.manager.save(savedToken);
 
-    const tokens: SsoResponseDto = {
-      accessToken,
-      refreshToken,
-      user: userDto,
-      state: session.state,
-    };
+    return { token: refreshToken, tokenId: savedToken.id };
+  }
 
-    return {
-      redirectUrl: session.returnUrl,
-      tokens,
-    };
+  private parseExpirationTime(expiration: string): number {
+    const unit = expiration.slice(-1);
+    const value = parseInt(expiration.slice(0, -1));
+
+    switch (unit) {
+      case 's':
+        return value;
+      case 'm':
+        return value * 60;
+      case 'h':
+        return value * 3600;
+      case 'd':
+        return value * 86400;
+      default:
+        return 900;
+    }
+  }
+
+  private calculateExpirationDate(expiration: string): Date {
+    const seconds = this.parseExpirationTime(expiration);
+    const date = new Date();
+    date.setSeconds(date.getSeconds() + seconds);
+    return date;
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
@@ -257,11 +526,22 @@ export class SsoService {
       expiresAt: LessThan(new Date()),
     });
 
-    const oneHourAgo = new Date();
-    oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     await this.ssoSessionRepository.delete({
       isConsumed: true,
-      createdAt: LessThan(oneHourAgo),
+      createdAt: LessThan(thirtyDaysAgo),
+    });
+
+    await this.authCodeRepository.delete({
+      expiresAt: LessThan(new Date()),
+    });
+
+    const oneDayAgo = new Date();
+    oneDayAgo.setDate(oneDayAgo.getDate() - 1);
+    await this.authCodeRepository.delete({
+      isUsed: true,
+      createdAt: LessThan(oneDayAgo),
     });
   }
 }
