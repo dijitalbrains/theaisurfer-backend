@@ -106,7 +106,16 @@ export class AuthService {
     }
   }
 
-  async validateToken(token: string): Promise<any> {
+  async validateToken(token: string): Promise<{
+    valid: boolean;
+    user: {
+      id: string;
+      email: string;
+      firstName: string;
+      lastName: string;
+    };
+    projectSlug?: string;
+  }> {
     try {
       const payload = this.jwtService.verify(token);
       

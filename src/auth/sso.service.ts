@@ -6,32 +6,28 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, LessThan } from 'typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { ProjectsService } from '../projects/projects.service';
 import { User } from '../users/entities/user.entity';
-import { SsoResponseDto, SsoUserDto, SsoSessionDto } from './dto/sso-response.dto';
+import { SsoSession } from './entities/sso-session.entity';
+import {
+  SsoResponseDto,
+  SsoUserDto,
+  SsoSessionDto,
+} from './dto/sso-response.dto';
 import * as crypto from 'crypto';
-
-interface SsoSession {
-  projectSlug: string;
-  projectName: string;
-  returnUrl: string;
-  state?: string;
-  createdAt: Date;
-}
 
 @Injectable()
 export class SsoService {
-  // In-memory session store (in production, use Redis or database)
-  private ssoSessions: Map<string, SsoSession> = new Map();
-
   constructor(
+    @InjectRepository(SsoSession)
+    private readonly ssoSessionRepository: Repository<SsoSession>,
     private readonly projectsService: ProjectsService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
-  ) {
-    // Clean up expired sessions every 5 minutes
-    setInterval(() => this.cleanupExpiredSessions(), 5 * 60 * 1000);
-  }
+  ) {}
 
   /**
    * Validate project credentials (slug + API key)
@@ -82,14 +78,41 @@ export class SsoService {
       throw new NotFoundException(`Project '${projectSlug}' not found`);
     }
 
-    if (!project.allowedRedirectUrls || project.allowedRedirectUrls.length === 0) {
+    if (
+      !project.allowedRedirectUrls ||
+      project.allowedRedirectUrls.length === 0
+    ) {
       throw new BadRequestException(
         `Project '${projectSlug}' has no allowed redirect URLs configured`,
       );
     }
 
+    let returnUrlObj: URL;
+    try {
+      returnUrlObj = new URL(returnUrl);
+    } catch {
+      throw new BadRequestException('Invalid return URL format');
+    }
+
     const isAllowed = project.allowedRedirectUrls.some((allowedUrl) => {
-      return returnUrl === allowedUrl || returnUrl.startsWith(allowedUrl);
+      try {
+        const allowedUrlObj = new URL(allowedUrl);
+
+        if (returnUrlObj.origin !== allowedUrlObj.origin) {
+          return false;
+        }
+
+        if (allowedUrlObj.pathname === '/' || allowedUrlObj.pathname === '') {
+          return true;
+        }
+
+        return (
+          returnUrlObj.pathname === allowedUrlObj.pathname ||
+          returnUrlObj.pathname.startsWith(allowedUrlObj.pathname)
+        );
+      } catch {
+        return returnUrl === allowedUrl;
+      }
     });
 
     if (!isAllowed) {
@@ -115,18 +138,22 @@ export class SsoService {
       throw new NotFoundException(`Project '${projectSlug}' not found`);
     }
 
-    // Generate secure random session ID
     const sessionId = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 15);
 
-    const session: SsoSession = {
+    const session = this.ssoSessionRepository.create({
+      id: sessionId,
+      projectId: project.id,
       projectSlug: project.slug,
       projectName: project.name,
       returnUrl,
       state,
-      createdAt: new Date(),
-    };
+      expiresAt,
+      isConsumed: false,
+    });
 
-    this.ssoSessions.set(sessionId, session);
+    await this.ssoSessionRepository.save(session);
 
     return sessionId;
   }
@@ -134,17 +161,23 @@ export class SsoService {
   /**
    * Get SSO session data
    */
-  getSSOSession(sessionId: string): SsoSessionDto | null {
-    const session = this.ssoSessions.get(sessionId);
+  async getSSOSession(sessionId: string): Promise<SsoSessionDto | null> {
+    const session = await this.ssoSessionRepository.findOne({
+      where: { id: sessionId },
+    });
 
     if (!session) {
+      console.log('[SSO] Session not found:', sessionId);
       return null;
     }
 
-    // Check if session is expired (15 minutes)
-    const expirationTime = 15 * 60 * 1000;
-    if (Date.now() - session.createdAt.getTime() > expirationTime) {
-      this.ssoSessions.delete(sessionId);
+    if (session.expiresAt < new Date()) {
+      console.log('[SSO] Session expired:', sessionId);
+      return null;
+    }
+
+    if (session.isConsumed) {
+      console.log('[SSO] Session already consumed:', sessionId);
       return null;
     }
 
@@ -163,17 +196,21 @@ export class SsoService {
     user: User,
     sessionId: string,
   ): Promise<{ redirectUrl: string; tokens: SsoResponseDto }> {
-    const session = this.getSSOSession(sessionId);
+    const session = await this.getSSOSession(sessionId);
 
     if (!session) {
       throw new BadRequestException('Invalid or expired SSO session');
     }
 
-    // Generate JWT tokens
+    await this.ssoSessionRepository.update(sessionId, { isConsumed: true });
+
+    // Generate JWT tokens with audience claim
     const payload = {
       sub: user.id,
       email: user.email,
       projectSlug: session.projectSlug,
+      aud: session.projectSlug,
+      type: 'access',
     };
 
     const accessToken = this.jwtService.sign(payload, {
@@ -181,7 +218,15 @@ export class SsoService {
       expiresIn: this.configService.get('JWT_ACCESS_EXPIRATION') || '15m',
     });
 
-    const refreshToken = this.jwtService.sign(payload, {
+    const refreshPayload = {
+      sub: user.id,
+      email: user.email,
+      projectSlug: session.projectSlug,
+      aud: session.projectSlug,
+      type: 'refresh',
+    };
+
+    const refreshToken = this.jwtService.sign(refreshPayload, {
       secret: this.configService.get('JWT_REFRESH_SECRET'),
       expiresIn: this.configService.get('JWT_REFRESH_EXPIRATION') || '7d',
     });
@@ -200,35 +245,23 @@ export class SsoService {
       state: session.state,
     };
 
-    // Build redirect URL with tokens
-    const redirectUrl = new URL(session.returnUrl);
-    redirectUrl.searchParams.set('token', accessToken);
-    redirectUrl.searchParams.set('refresh', refreshToken);
-    redirectUrl.searchParams.set('user', JSON.stringify(userDto));
-    if (session.state) {
-      redirectUrl.searchParams.set('state', session.state);
-    }
-
-    // Delete session after use
-    this.ssoSessions.delete(sessionId);
-
     return {
-      redirectUrl: redirectUrl.toString(),
+      redirectUrl: session.returnUrl,
       tokens,
     };
   }
 
-  /**
-   * Clean up expired SSO sessions
-   */
-  private cleanupExpiredSessions(): void {
-    const expirationTime = 15 * 60 * 1000; // 15 minutes
-    const now = Date.now();
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async cleanupExpiredSessions(): Promise<void> {
+    await this.ssoSessionRepository.delete({
+      expiresAt: LessThan(new Date()),
+    });
 
-    for (const [sessionId, session] of this.ssoSessions.entries()) {
-      if (now - session.createdAt.getTime() > expirationTime) {
-        this.ssoSessions.delete(sessionId);
-      }
-    }
+    const oneHourAgo = new Date();
+    oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+    await this.ssoSessionRepository.delete({
+      isConsumed: true,
+      createdAt: LessThan(oneHourAgo),
+    });
   }
 }

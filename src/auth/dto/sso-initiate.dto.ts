@@ -22,7 +22,7 @@ export class SsoInitiateDto {
     example: 'https://remixer.theaisurfer.com/auth/callback',
     description: 'URL to redirect back to after authentication (must be whitelisted)',
   })
-  @IsUrl()
+  @IsUrl({ require_tld: false })
   @IsNotEmpty()
   returnUrl: string;
 

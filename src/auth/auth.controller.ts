@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Query,
   BadRequestException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -22,10 +23,12 @@ import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { SsoInitiateDto } from './dto/sso-initiate.dto';
-import { SsoResponseDto, SsoSessionDto } from './dto/sso-response.dto';
+import { SsoSessionDto } from './dto/sso-response.dto';
+import { TokenValidationResponseDto } from './dto/token-validation-response.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { User } from '../users/entities/user.entity';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -62,7 +65,10 @@ export class AuthController {
     description: 'User successfully logged in',
     type: AuthResponseDto,
   })
-  @ApiResponse({ status: 401, description: 'Invalid credentials or no project access' })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid credentials or no project access',
+  })
   @ApiResponse({ status: 400, description: 'Invalid redirect URL' })
   async login(@Body() loginDto: LoginDto): Promise<AuthResponseDto> {
     return this.authService.login(loginDto);
@@ -78,9 +84,7 @@ export class AuthController {
     type: AuthResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh token' })
-  async refresh(
-    @Body() refreshTokenDto: RefreshTokenDto,
-  ): Promise<AuthResponseDto> {
+  refresh(@Body() refreshTokenDto: RefreshTokenDto): Promise<AuthResponseDto> {
     return this.authService.refreshTokens(refreshTokenDto.refreshToken);
   }
 
@@ -88,26 +92,16 @@ export class AuthController {
   @Public()
   @ApiOperation({
     summary: 'Validate access token',
-    description: 'Verify if an access token is valid and check user/project access',
+    description:
+      'Verify if an access token is valid and check user/project access',
   })
   @ApiResponse({
     status: 200,
     description: 'Token is valid',
-    schema: {
-      example: {
-        valid: true,
-        user: {
-          id: 'uuid',
-          email: 'user@example.com',
-          firstName: 'John',
-          lastName: 'Doe',
-        },
-        projectSlug: 'remixer',
-      },
-    },
+    type: TokenValidationResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Invalid token' })
-  async validate(@Query('token') token: string) {
+  validate(@Query('token') token: string): Promise<TokenValidationResponseDto> {
     return this.authService.validateToken(token);
   }
 
@@ -129,7 +123,9 @@ export class AuthController {
     },
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getCurrentUser(@CurrentUser() user: any) {
+  getCurrentUser(
+    @CurrentUser() user: { id: string; email: string; projectSlug?: string },
+  ) {
     return user;
   }
 
@@ -146,32 +142,36 @@ export class AuthController {
     schema: {
       example: {
         sessionId: 'a1b2c3d4e5f6...',
-        message: 'SSO session created. Redirect user to /sso/session?id=...',
+        message: 'SSO session created successfully',
       },
     },
   })
-  @ApiResponse({ status: 401, description: 'Invalid API key or project not found' })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid API key or project not found',
+  })
   @ApiResponse({ status: 400, description: 'Invalid return URL' })
   async initiateSso(@Query() ssoInitiateDto: SsoInitiateDto) {
-    const { project, apiKey, returnUrl, state } = ssoInitiateDto;
+    try {
+      const { project, apiKey, returnUrl, state } = ssoInitiateDto;
 
-    // Validate project credentials
-    await this.ssoService.validateProjectCredentials(project, apiKey);
+      await this.ssoService.validateProjectCredentials(project, apiKey);
+      await this.ssoService.validateReturnUrl(project, returnUrl);
 
-    // Validate return URL
-    await this.ssoService.validateReturnUrl(project, returnUrl);
+      const sessionId = await this.ssoService.generateSSOSession(
+        project,
+        returnUrl,
+        state,
+      );
 
-    // Generate SSO session
-    const sessionId = await this.ssoService.generateSSOSession(
-      project,
-      returnUrl,
-      state,
-    );
-
-    return {
-      sessionId,
-      message: 'SSO session created successfully',
-    };
+      return {
+        sessionId,
+        message: 'SSO session created successfully',
+      };
+    } catch (error) {
+      console.error('[SSO] Failed to initiate SSO:', error);
+      throw error;
+    }
   }
 
   @Get('sso/session')
@@ -188,9 +188,14 @@ export class AuthController {
   })
   @ApiResponse({ status: 400, description: 'Invalid or expired session' })
   async getSsoSession(@Query('id') sessionId: string) {
-    const session = this.ssoService.getSSOSession(sessionId);
+    if (!sessionId) {
+      throw new BadRequestException('Session ID is required');
+    }
+
+    const session = await this.ssoService.getSSOSession(sessionId);
 
     if (!session) {
+      console.log('[SSO] Session not found or consumed:', sessionId);
       throw new BadRequestException('Invalid or expired SSO session');
     }
 
@@ -211,8 +216,7 @@ export class AuthController {
     description: 'SSO authentication completed, redirect URL generated',
     schema: {
       example: {
-        redirectUrl:
-          'https://remixer.theaisurfer.com/auth/callback?token=xxx&refresh=yyy&user=...',
+        redirectUrl: 'https://remixer.theaisurfer.com/auth/callback',
         tokens: {
           accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
           refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
@@ -230,11 +234,32 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'User not authenticated' })
   @ApiResponse({ status: 400, description: 'Invalid or expired SSO session' })
   async completeSso(
-    @CurrentUser() user: any,
+    @CurrentUser() user: User,
     @Body('sessionId') sessionId: string,
   ) {
-    const result = await this.ssoService.completeSSOAuth(user, sessionId);
-    return result;
+    try {
+      if (!sessionId) {
+        throw new BadRequestException('Session ID is required');
+      }
+
+      if (!user || !user.id) {
+        throw new UnauthorizedException('User not authenticated');
+      }
+
+      console.log(
+        `[SSO] Completing SSO auth for user ${user.email}, session ${sessionId}`,
+      );
+
+      const result = await this.ssoService.completeSSOAuth(user, sessionId);
+
+      console.log(
+        `[SSO] SSO auth completed successfully for user ${user.email}`,
+      );
+
+      return result;
+    } catch (error) {
+      console.error('[SSO] Failed to complete SSO auth:', error);
+      throw error;
+    }
   }
 }
-

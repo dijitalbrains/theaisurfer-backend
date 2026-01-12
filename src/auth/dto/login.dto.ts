@@ -21,7 +21,7 @@ export class LoginDto {
     example: 'https://remixer.theaisurfer.com/callback',
     required: false,
   })
-  @IsUrl()
+  @IsUrl({ require_tld: false })
   @IsOptional()
   redirectUrl?: string;
 }

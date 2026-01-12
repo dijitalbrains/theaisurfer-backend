@@ -79,11 +79,30 @@ export class ProjectsService {
       return false;
     }
 
-    // Check if redirectUrl matches any allowed URL
-    return project.allowedRedirectUrls.some((allowedUrl) => {
-      // Simple exact match or startsWith check
-      return redirectUrl === allowedUrl || redirectUrl.startsWith(allowedUrl);
-    });
+    try {
+      const redirectUrlObj = new URL(redirectUrl);
+      
+      return project.allowedRedirectUrls.some((allowedUrl) => {
+        try {
+          const allowedUrlObj = new URL(allowedUrl);
+          
+          if (redirectUrlObj.origin !== allowedUrlObj.origin) {
+            return false;
+          }
+          
+          if (allowedUrlObj.pathname === '/' || allowedUrlObj.pathname === '') {
+            return true;
+          }
+          
+          return redirectUrlObj.pathname === allowedUrlObj.pathname ||
+                 redirectUrlObj.pathname.startsWith(allowedUrlObj.pathname);
+        } catch {
+          return redirectUrl === allowedUrl;
+        }
+      });
+    } catch {
+      return false;
+    }
   }
 
   async getUserProjects(): Promise<Project[]> {
