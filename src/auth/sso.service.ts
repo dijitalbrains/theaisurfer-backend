@@ -198,17 +198,14 @@ export class SsoService {
     });
 
     if (!session) {
-      console.log('[SSO] Session not found:', sessionId);
       return null;
     }
 
     if (session.expiresAt < new Date()) {
-      console.log('[SSO] Session expired:', sessionId);
       return null;
     }
 
     if (session.isConsumed) {
-      console.log('[SSO] Session already consumed:', sessionId);
       return null;
     }
 
@@ -518,6 +515,85 @@ export class SsoService {
     const date = new Date();
     date.setSeconds(date.getSeconds() + seconds);
     return date;
+  }
+
+  async generateQuickLoginToken(
+    user: User,
+    projectSlug: string,
+  ): Promise<{ token: string; loginUrl: string }> {
+    const project = await this.projectsService.findBySlug(projectSlug);
+    
+    if (!project || !project.isActive) {
+      throw new NotFoundException(`Project '${projectSlug}' not found or inactive`);
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setSeconds(expiresAt.getSeconds() + 60);
+
+    const session = this.ssoSessionRepository.create({
+      id: token,
+      projectId: project.id,
+      projectSlug: project.slug,
+      projectName: project.name,
+      returnUrl: project.allowedRedirectUrls[0],
+      state: 'quick-login',
+      codeChallenge: '',
+      codeChallengeMethod: '',
+      userId: user.id,
+      expiresAt,
+      isConsumed: false,
+    });
+
+    await this.ssoSessionRepository.save(session);
+
+    const childBaseUrl = new URL(project.allowedRedirectUrls[0]).origin;
+    const loginUrl = `${childBaseUrl}/auth/quick-login?token=${token}`;
+
+    return { token, loginUrl };
+  }
+
+  async getQuickLoginSession(token: string): Promise<{ user: any } | null> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const session = await queryRunner.manager.findOne(SsoSession, {
+        where: { id: token },
+        relations: ['user'],
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!session || session.expiresAt < new Date() || session.isConsumed) {
+        await queryRunner.rollbackTransaction();
+        return null;
+      }
+
+      session.isConsumed = true;
+      session.consumedAt = new Date();
+      await queryRunner.manager.save(session);
+
+      await queryRunner.commitTransaction();
+
+      if (!session.user) {
+        return null;
+      }
+
+      return {
+        user: {
+          id: session.user.id,
+          email: session.user.email,
+          firstName: session.user.firstName,
+          lastName: session.user.lastName,
+        },
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)

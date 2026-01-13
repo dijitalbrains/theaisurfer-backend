@@ -165,44 +165,39 @@ export class AuthController {
     @Ip() ipAddress: string,
     @Req() req: Request,
   ) {
-    try {
-      const { project, apiKey, returnUrl, state, codeChallenge, codeChallengeMethod } =
-        ssoInitiateDto;
-      const userAgent = req.get('user-agent');
+    const { project, apiKey, returnUrl, state, codeChallenge, codeChallengeMethod } =
+      ssoInitiateDto;
+    const userAgent = req.get('user-agent');
 
-      await this.ssoService.validateProjectCredentials(
-        project,
-        apiKey,
-        ipAddress,
-        userAgent,
-      );
-      
-      await this.ssoService.validateReturnUrl(
-        project,
-        returnUrl,
-        undefined,
-        ipAddress,
-        userAgent,
-      );
+    await this.ssoService.validateProjectCredentials(
+      project,
+      apiKey,
+      ipAddress,
+      userAgent,
+    );
+    
+    await this.ssoService.validateReturnUrl(
+      project,
+      returnUrl,
+      undefined,
+      ipAddress,
+      userAgent,
+    );
 
-      const sessionId = await this.ssoService.generateSSOSession(
-        project,
-        returnUrl,
-        state,
-        codeChallenge,
-        codeChallengeMethod,
-        ipAddress,
-        userAgent,
-      );
+    const sessionId = await this.ssoService.generateSSOSession(
+      project,
+      returnUrl,
+      state,
+      codeChallenge,
+      codeChallengeMethod,
+      ipAddress,
+      userAgent,
+    );
 
-      return {
-        sessionId,
-        message: 'SSO session created successfully',
-      };
-    } catch (error) {
-      console.error('[SSO] Failed to initiate SSO:', error);
-      throw error;
-    }
+    return {
+      sessionId,
+      message: 'SSO session created successfully',
+    };
   }
 
   @Get('sso/session')
@@ -226,7 +221,6 @@ export class AuthController {
     const session = await this.ssoService.getSSOSession(sessionId);
 
     if (!session) {
-      console.log('[SSO] Session not found or consumed:', sessionId);
       throw new BadRequestException('Invalid or expired SSO session');
     }
 
@@ -255,38 +249,66 @@ export class AuthController {
     @Ip() ipAddress: string,
     @Req() req: Request,
   ): Promise<AuthorizationCodeResponseDto> {
-    try {
-      const { sessionId } = authorizeDto;
-      const userAgent = req.get('user-agent');
+    const { sessionId } = authorizeDto;
+    const userAgent = req.get('user-agent');
 
-      if (!sessionId) {
-        throw new BadRequestException('Session ID is required');
-      }
-
-      if (!user || !user.id) {
-        throw new UnauthorizedException('User not authenticated');
-      }
-
-      console.log(
-        `[SSO] Authorizing SSO for user ${user.email}, session ${sessionId}`,
-      );
-
-      const result = await this.ssoService.authorizeSession(
-        user,
-        sessionId,
-        ipAddress,
-        userAgent,
-      );
-
-      console.log(
-        `[SSO] Authorization code generated for user ${user.email}`,
-      );
-
-      return result;
-    } catch (error) {
-      console.error('[SSO] Failed to authorize SSO:', error);
-      throw error;
+    if (!sessionId) {
+      throw new BadRequestException('Session ID is required');
     }
+
+    if (!user || !user.id) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    const result = await this.ssoService.authorizeSession(
+      user,
+      sessionId,
+      ipAddress,
+      userAgent,
+    );
+
+    return result;
+  }
+
+  @Post('sso/quick-login')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  async quickLogin(
+    @CurrentUser() user: User,
+    @Body() body: { projectSlug: string },
+  ): Promise<{ loginUrl: string }> {
+    const { projectSlug } = body;
+    
+    const token = await this.ssoService.generateQuickLoginToken(user, projectSlug);
+    return { loginUrl: token.loginUrl };
+  }
+
+  @Post('sso/validate-quick-login')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  async validateQuickLogin(
+    @Body() body: { token: string; projectSlug: string; apiKey: string },
+    @Ip() ipAddress: string,
+    @Req() req: Request,
+  ) {
+    const { token, projectSlug, apiKey } = body;
+    const userAgent = req.get('user-agent');
+
+    await this.ssoService.validateProjectCredentials(
+      projectSlug,
+      apiKey,
+      ipAddress,
+      userAgent,
+    );
+
+    const session = await this.ssoService.getQuickLoginSession(token);
+    
+    if (!session) {
+      throw new UnauthorizedException('Invalid or expired quick login token');
+    }
+
+    return session.user;
   }
 
   @Post('sso/token')
@@ -311,33 +333,26 @@ export class AuthController {
     @Ip() ipAddress: string,
     @Req() req: Request,
   ): Promise<TokenResponseDto> {
-    try {
-      const { code, codeVerifier, projectSlug, apiKey, redirectUri } =
-        tokenExchangeDto;
-      const userAgent = req.get('user-agent');
+    const { code, codeVerifier, projectSlug, apiKey, redirectUri } =
+      tokenExchangeDto;
+    const userAgent = req.get('user-agent');
 
-      await this.ssoService.validateProjectCredentials(
-        projectSlug,
-        apiKey,
-        ipAddress,
-        userAgent,
-      );
+    await this.ssoService.validateProjectCredentials(
+      projectSlug,
+      apiKey,
+      ipAddress,
+      userAgent,
+    );
 
-      const tokens = await this.ssoService.exchangeCodeForTokens(
-        code,
-        codeVerifier,
-        projectSlug,
-        redirectUri,
-        ipAddress,
-        userAgent,
-      );
+    const tokens = await this.ssoService.exchangeCodeForTokens(
+      code,
+      codeVerifier,
+      projectSlug,
+      redirectUri,
+      ipAddress,
+      userAgent,
+    );
 
-      console.log(`[SSO] Token exchange successful for project ${projectSlug}`);
-
-      return tokens;
-    } catch (error) {
-      console.error('[SSO] Token exchange failed:', error);
-      throw error;
-    }
+    return tokens;
   }
 }
