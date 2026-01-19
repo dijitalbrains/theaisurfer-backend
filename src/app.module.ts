@@ -6,6 +6,9 @@ import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
 import { ProjectsModule } from './projects/projects.module';
 import { AuthModule } from './auth/auth.module';
+import { StripeModule } from './stripe/stripe.module';
+import { WaxModule } from './wax/wax.module';
+import { OrderModule } from './order/order.module';
 
 @Module({
   imports: [
@@ -34,6 +37,9 @@ import { AuthModule } from './auth/auth.module';
     UsersModule,
     ProjectsModule,
     AuthModule,
+    StripeModule,
+    OrderModule,
+    WaxModule,
   ],
   controllers: [AppController],
   providers: [AppService],
