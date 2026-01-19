@@ -1,9 +1,17 @@
-import { Controller, Get, Post, Body, Req, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  UseGuards,
+  BadRequestException,
+} from '@nestjs/common';
 import { WaxService } from './wax.service';
 import { PurchaseWaxDto } from './dto/purchase-wax.dto';
-import { FreeWaxDto } from './dto/free-wax.dto';
 import { UpdateAutoReloadDto } from './dto/update-auto-reload.dto';
+import { AddPaymentMethodDto } from './dto/add-payment-method.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @Controller('wax')
 @UseGuards(JwtAuthGuard)
@@ -11,29 +19,34 @@ export class WaxController {
   constructor(private readonly waxService: WaxService) {}
 
   @Get()
-  getWaxDashboard(@Req() req) {
-    return this.waxService.getWaxDetails(req.user.id);
+  getWaxDetails(@CurrentUser('id') userId: string) {
+    return this.waxService.getWaxDetails(userId);
   }
 
   @Post('purchase')
-  purchase(@Body() dto: PurchaseWaxDto, @Req() req) {
-    return this.waxService.purchaseWax(req.user.id, dto.amount);
-  }
-
-  @Post('free')
-  free(@Body() dto: FreeWaxDto) {
-    return this.waxService.freeWax(dto.userId, dto.amount);
+  purchaseWax(
+    @Body() dto: PurchaseWaxDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.waxService.purchaseWax(userId, dto.amount);
   }
 
   @Post('auto-reload')
-  updateAutoReload(@Body() dto: UpdateAutoReloadDto, @Req() req) {
-    return this.waxService.updateAutoReload(req.user.id, dto);
+  updateAutoReloadSettings(
+    @Body() dto: UpdateAutoReloadDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.waxService.updateAutoReloadSettings(userId, dto);
   }
-  @Post('add-card')
-  addCard(@Body('paymentMethodId') paymentMethodId: string, @Req() req) {
-    if (!paymentMethodId) {
-        throw new BadRequestException('Payment method ID is required');
+
+  @Post('payment-method')
+  addPaymentMethod(
+    @Body() dto: AddPaymentMethodDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    if (!dto.paymentMethodId) {
+      throw new BadRequestException('Payment method ID is required');
     }
-    return this.waxService.addCard(req.user.id, paymentMethodId);
+    return this.waxService.addPaymentMethod(userId, dto.paymentMethodId);
   }
 }

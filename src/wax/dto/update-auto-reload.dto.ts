@@ -1,22 +1,16 @@
-import {
-  IsBoolean,
-  IsInt,
-  Min,
-  ValidateIf,
-} from 'class-validator';
+import { IsBoolean, IsInt, Min, ValidateIf } from 'class-validator';
 
 export class UpdateAutoReloadDto {
-  
   @IsBoolean()
-  autoReloadEnabled: boolean;
+  enabled: boolean;
 
-  @ValidateIf(o => o.autoReloadEnabled === true)
+  @ValidateIf((o) => o.enabled === true)
   @IsInt()
   @Min(1)
-  reloadThreshold: number;
+  threshold: number;
 
-  @ValidateIf(o => o.autoReloadEnabled === true)
+  @ValidateIf((o) => o.enabled === true)
   @IsInt()
   @Min(1)
-  reloadAmount: number;
+  amount: number;
 }

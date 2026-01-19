@@ -10,8 +10,8 @@ export class Order {
   @PrimaryGeneratedColumn('increment')
   id: number;
 
-  @Column({ name: 'user_id', type: 'int' })
-  userId: number;
+  @Column({ name: 'user_id', type: 'varchar', length: 36 })
+  userId: string;
 
   @Column({ length: 50 })
   type: string;
