@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Repository } from 'typeorm';
 import { StripeService } from '../stripe/stripe.service';
 import { UpdateAutoReloadDto } from './dto/update-auto-reload.dto';
@@ -103,6 +104,12 @@ export class WaxService {
     return user;
   }
 
+  private validateUserHasPaymentMethod(user: User): void {
+    if (!user.stripeCustomerId || !user.stripeSourceId) {
+      throw new BadRequestException('User does not have a payment method');
+    }
+  }
+
   private validatePurchaseAmount(amount: number): void {
     if (amount > MAX_PURCHASE_AMOUNT) {
       throw new BadRequestException(
@@ -111,10 +118,16 @@ export class WaxService {
     }
   }
 
-  private validateUserHasPaymentMethod(user: User): void {
-    if (!user.stripeCustomerId || !user.stripeSourceId) {
-      throw new BadRequestException('User does not have a payment method');
-    }
+  private async chargeUser(
+    user: User,
+    amountInCents: number,
+    amountInDollars: number,
+  ): Promise<void> {
+    await this.stripeService.charge(
+      user.stripeCustomerId!,
+      amountInCents,
+      `Purchase $${amountInDollars} wax`,
+    );
   }
 
   private convertDollarsToCents(dollars: number): number {
@@ -129,18 +142,6 @@ export class WaxService {
 
   private calculateCredits(amountInCents: number): number {
     return amountInCents * this.getCreditsPerCent();
-  }
-
-  private async chargeUser(
-    user: User,
-    amountInCents: number,
-    amountInDollars: number,
-  ): Promise<void> {
-    await this.stripeService.charge(
-      user.stripeCustomerId!,
-      amountInCents,
-      `Purchase $${amountInDollars} wax`,
-    );
   }
 
   private async addCreditsToUser(user: User, credits: number): Promise<void> {
@@ -160,5 +161,24 @@ export class WaxService {
       quantity,
       price,
     });
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async restockCredits(): Promise<void> {
+    const queryBuilder = this.userRepository
+      .createQueryBuilder('user')
+      .where('user.stripe_customer_id IS NOT NULL')
+      .andWhere('user.stripe_source_id IS NOT NULL')
+      .andWhere('user.auto_reload = true')
+      .andWhere('user.purchased_credits < user.reload_threshold');
+
+    const users = await queryBuilder.getMany();
+
+    for (const user of users) {
+      try {
+        await this.purchaseWax(user.id, user.reloadAmount, 'wax_restock');
+      } catch (error) {
+      }
+    }
   }
 }

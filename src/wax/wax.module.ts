@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { TypeOrmModule } from "@nestjs/typeorm";
+import { ScheduleModule } from "@nestjs/schedule";
 import { WaxController } from "./wax.controller";
 import { WaxService } from "./wax.service";
 import { StripeModule } from "../stripe/stripe.module";
@@ -9,6 +10,7 @@ import { OrderModule } from "../order/order.module";
 @Module({
   imports: [
     TypeOrmModule.forFeature([User]),
+    ScheduleModule.forRoot(),
     StripeModule,
     OrderModule,
   ],
