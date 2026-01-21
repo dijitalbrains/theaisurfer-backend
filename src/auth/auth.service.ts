@@ -15,6 +15,8 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { User } from '../users/entities/user.entity';
+import { JwtPayload } from './types/jwt-payload.interface';
+import type { StringValue } from 'ms';
 
 @Injectable()
 export class AuthService {
@@ -30,7 +32,6 @@ export class AuthService {
   async register(registerDto: RegisterDto): Promise<AuthResponseDto> {
     const user = await this.usersService.create(registerDto);
 
-    // Generate tokens without project context
     const tokens = await this.generateTokens(user, null);
 
     return tokens;
@@ -39,13 +40,11 @@ export class AuthService {
   async login(loginDto: LoginDto): Promise<AuthResponseDto> {
     const { email, password, projectSlug, redirectUrl } = loginDto;
 
-    // Validate user credentials
     const user = await this.usersService.validateUser(email, password);
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // If project is specified, validate redirect URL
     if (projectSlug && redirectUrl) {
       const isValidRedirect = await this.projectsService.validateRedirectUrl(
         projectSlug,
@@ -57,7 +56,6 @@ export class AuthService {
       }
     }
 
-    // Generate tokens with project context
     const tokens = await this.generateTokens(user, projectSlug || null);
 
     return tokens;
@@ -65,16 +63,14 @@ export class AuthService {
 
   async refreshTokens(refreshToken: string): Promise<AuthResponseDto> {
     try {
-      // Verify refresh token
-      const payload = this.jwtService.verify(refreshToken, {
-        secret: this.configService.get('JWT_REFRESH_SECRET'),
+      const payload = this.jwtService.verify<JwtPayload>(refreshToken, {
+        secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
       });
 
       if (payload.type !== 'refresh') {
         throw new UnauthorizedException('Invalid token type');
       }
 
-      // Check if token exists in database and is not revoked
       const storedToken = await this.refreshTokenRepository.findOne({
         where: { id: payload.tokenId },
       });
@@ -83,25 +79,24 @@ export class AuthService {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
-      // Check if token is expired
       if (new Date() > storedToken.expiresAt) {
         throw new UnauthorizedException('Refresh token expired');
       }
 
-      // Get user
       const user = await this.usersService.findById(payload.sub);
       if (!user || !user.isActive) {
         throw new UnauthorizedException('User not found or inactive');
       }
 
-      // Revoke old refresh token
       await this.revokeRefreshToken(storedToken.id);
 
-      // Generate new tokens
-      const tokens = await this.generateTokens(user, payload.projectSlug);
+      const tokens = await this.generateTokens(
+        user,
+        payload.projectSlug ?? null,
+      );
 
       return tokens;
-    } catch (error) {
+    } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
   }
@@ -114,11 +109,11 @@ export class AuthService {
       firstName: string;
       lastName: string;
     };
-    projectSlug?: string;
+    projectSlug?: string | null;
   }> {
     try {
-      const payload = this.jwtService.verify(token);
-      
+      const payload = this.jwtService.verify<JwtPayload>(token);
+
       if (payload.type !== 'access') {
         throw new UnauthorizedException('Invalid token type');
       }
@@ -136,9 +131,9 @@ export class AuthService {
           firstName: user.firstName,
           lastName: user.lastName,
         },
-        projectSlug: payload.projectSlug,
+        projectSlug: payload.projectSlug ?? undefined,
       };
-    } catch (error) {
+    } catch {
       throw new UnauthorizedException('Invalid token');
     }
   }
@@ -147,8 +142,7 @@ export class AuthService {
     user: User,
     projectSlug: string | null,
   ): Promise<AuthResponseDto> {
-    // Generate access token
-    const accessTokenPayload = {
+    const accessTokenPayload: JwtPayload = {
       sub: user.id,
       email: user.email,
       projectSlug,
@@ -157,15 +151,13 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(accessTokenPayload);
 
-    // Generate refresh token
     const refreshTokenData = await this.generateRefreshToken(
       user.id,
       projectSlug,
     );
 
-    // Get expiration time in seconds
     const expiresIn = this.parseExpirationTime(
-      this.configService.get('JWT_ACCESS_EXPIRATION') || '15m',
+      this.configService.get<StringValue>('JWT_ACCESS_EXPIRATION') ?? '15m',
     );
 
     return {
@@ -180,21 +172,20 @@ export class AuthService {
     userId: string,
     projectSlug: string | null,
   ): Promise<{ token: string; tokenId: string }> {
-    // Calculate expiration date
-    const expirationStr = this.configService.get('JWT_REFRESH_EXPIRATION');
+    const expirationStr =
+      this.configService.get<StringValue>('JWT_REFRESH_EXPIRATION') ?? '7d';
     const expiresAt = this.calculateExpirationDate(expirationStr);
 
-    // Create refresh token record
     const refreshTokenEntity = this.refreshTokenRepository.create({
       userId,
       expiresAt,
       token: '', // Will be updated with hashed token
     });
 
-    const savedToken = await this.refreshTokenRepository.save(refreshTokenEntity);
+    const savedToken =
+      await this.refreshTokenRepository.save(refreshTokenEntity);
 
-    // Generate JWT with token ID
-    const refreshTokenPayload = {
+    const refreshTokenPayload: JwtPayload = {
       sub: userId,
       tokenId: savedToken.id,
       projectSlug,
@@ -202,11 +193,10 @@ export class AuthService {
     };
 
     const refreshToken = this.jwtService.sign(refreshTokenPayload, {
-      secret: this.configService.get('JWT_REFRESH_SECRET'),
+      secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
       expiresIn: expirationStr,
     });
 
-    // Hash and store the token
     const hashedToken = await bcrypt.hash(refreshToken, 10);
     savedToken.token = hashedToken;
     await this.refreshTokenRepository.save(savedToken);
@@ -250,4 +240,3 @@ export class AuthService {
     return date;
   }
 }
-

@@ -15,6 +15,7 @@ import { SsoAuditLog } from './entities/sso-audit-log.entity';
 import { UsersModule } from '../users/users.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import type { StringValue } from 'ms';
 
 @Module({
   imports: [
@@ -28,9 +29,10 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
-        const expiresIn = configService.get('JWT_ACCESS_EXPIRATION') || '15m';
+        const expiresIn =
+          configService.get<StringValue>('JWT_ACCESS_EXPIRATION') ?? '15m';
         return {
-          secret: configService.get('JWT_SECRET'),
+          secret: configService.get<string>('JWT_SECRET'),
           signOptions: { expiresIn },
         };
       },

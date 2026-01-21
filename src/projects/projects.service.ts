@@ -75,27 +75,32 @@ export class ProjectsService {
       return false;
     }
 
-    if (!project.allowedRedirectUrls || project.allowedRedirectUrls.length === 0) {
+    if (
+      !project.allowedRedirectUrls ||
+      project.allowedRedirectUrls.length === 0
+    ) {
       return false;
     }
 
     try {
       const redirectUrlObj = new URL(redirectUrl);
-      
+
       return project.allowedRedirectUrls.some((allowedUrl) => {
         try {
           const allowedUrlObj = new URL(allowedUrl);
-          
+
           if (redirectUrlObj.origin !== allowedUrlObj.origin) {
             return false;
           }
-          
+
           if (allowedUrlObj.pathname === '/' || allowedUrlObj.pathname === '') {
             return true;
           }
-          
-          return redirectUrlObj.pathname === allowedUrlObj.pathname ||
-                 redirectUrlObj.pathname.startsWith(allowedUrlObj.pathname);
+
+          return (
+            redirectUrlObj.pathname === allowedUrlObj.pathname ||
+            redirectUrlObj.pathname.startsWith(allowedUrlObj.pathname)
+          );
         } catch {
           return redirectUrl === allowedUrl;
         }
@@ -106,7 +111,6 @@ export class ProjectsService {
   }
 
   async getUserProjects(): Promise<Project[]> {
-    // Return all active projects - user has access to all projects by default
     return this.findAll();
   }
 }

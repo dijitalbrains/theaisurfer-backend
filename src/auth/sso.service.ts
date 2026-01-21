@@ -15,14 +15,13 @@ import { SsoSession } from './entities/sso-session.entity';
 import { AuthorizationCode } from './entities/authorization-code.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { SsoSessionDto } from './dto/sso-response.dto';
-import {
-  AuthorizationCodeResponseDto,
-  TokenResponseDto,
-} from './dto/pkce.dto';
+import { AuthorizationCodeResponseDto, TokenResponseDto } from './dto/pkce.dto';
 import { PkceService } from './pkce.service';
 import { AuditService } from './audit.service';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
+import type { QueryRunner } from 'typeorm';
+import type { StringValue } from 'ms';
 
 @Injectable()
 export class SsoService {
@@ -456,9 +455,10 @@ export class SsoService {
     projectId: string,
     projectSlug: string,
     ssoSessionId: string,
-    queryRunner: any,
+    queryRunner: QueryRunner,
   ): Promise<{ token: string; tokenId: string }> {
-    const expirationStr = this.configService.get('JWT_REFRESH_EXPIRATION');
+    const expirationStr =
+      this.configService.get<StringValue>('JWT_REFRESH_EXPIRATION') ?? '7d';
     const expiresAt = this.calculateExpirationDate(expirationStr);
 
     const refreshTokenEntity = queryRunner.manager.create(RefreshToken, {
@@ -481,7 +481,7 @@ export class SsoService {
     };
 
     const refreshToken = this.jwtService.sign(refreshTokenPayload, {
-      secret: this.configService.get('JWT_REFRESH_SECRET'),
+      secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
       expiresIn: expirationStr,
     });
 
@@ -522,9 +522,11 @@ export class SsoService {
     projectSlug: string,
   ): Promise<{ token: string; loginUrl: string }> {
     const project = await this.projectsService.findBySlug(projectSlug);
-    
+
     if (!project || !project.isActive) {
-      throw new NotFoundException(`Project '${projectSlug}' not found or inactive`);
+      throw new NotFoundException(
+        `Project '${projectSlug}' not found or inactive`,
+      );
     }
 
     const token = crypto.randomBytes(32).toString('hex');
@@ -553,7 +555,14 @@ export class SsoService {
     return { token, loginUrl };
   }
 
-  async getQuickLoginSession(token: string): Promise<{ user: any } | null> {
+  async getQuickLoginSession(token: string): Promise<{
+    user: {
+      id: string;
+      email: string;
+      firstName: string;
+      lastName: string;
+    };
+  } | null> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();

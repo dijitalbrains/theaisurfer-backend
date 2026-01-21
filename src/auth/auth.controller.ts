@@ -159,14 +159,23 @@ export class AuthController {
     status: 401,
     description: 'Invalid API key or project not found',
   })
-  @ApiResponse({ status: 400, description: 'Invalid return URL or PKCE parameters' })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid return URL or PKCE parameters',
+  })
   async initiateSso(
     @Query() ssoInitiateDto: SsoInitiateDto,
     @Ip() ipAddress: string,
     @Req() req: Request,
   ) {
-    const { project, apiKey, returnUrl, state, codeChallenge, codeChallengeMethod } =
-      ssoInitiateDto;
+    const {
+      project,
+      apiKey,
+      returnUrl,
+      state,
+      codeChallenge,
+      codeChallengeMethod,
+    } = ssoInitiateDto;
     const userAgent = req.get('user-agent');
 
     await this.ssoService.validateProjectCredentials(
@@ -175,7 +184,7 @@ export class AuthController {
       ipAddress,
       userAgent,
     );
-    
+
     await this.ssoService.validateReturnUrl(
       project,
       returnUrl,
@@ -279,8 +288,11 @@ export class AuthController {
     @Body() body: { projectSlug: string },
   ): Promise<{ loginUrl: string }> {
     const { projectSlug } = body;
-    
-    const token = await this.ssoService.generateQuickLoginToken(user, projectSlug);
+
+    const token = await this.ssoService.generateQuickLoginToken(
+      user,
+      projectSlug,
+    );
     return { loginUrl: token.loginUrl };
   }
 
@@ -291,7 +303,12 @@ export class AuthController {
     @Body() body: { token: string; projectSlug: string; apiKey: string },
     @Ip() ipAddress: string,
     @Req() req: Request,
-  ) {
+  ): Promise<{
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+  }> {
     const { token, projectSlug, apiKey } = body;
     const userAgent = req.get('user-agent');
 
@@ -303,7 +320,7 @@ export class AuthController {
     );
 
     const session = await this.ssoService.getQuickLoginSession(token);
-    
+
     if (!session) {
       throw new UnauthorizedException('Invalid or expired quick login token');
     }

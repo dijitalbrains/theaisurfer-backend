@@ -12,7 +12,11 @@ export class PkceService {
       throw new Error('Only S256 code challenge method is supported');
     }
 
-    if (!codeVerifier || codeVerifier.length < 43 || codeVerifier.length > 128) {
+    if (
+      !codeVerifier ||
+      codeVerifier.length < 43 ||
+      codeVerifier.length > 128
+    ) {
       return false;
     }
 
@@ -21,7 +25,7 @@ export class PkceService {
     }
 
     const computedChallenge = this.generateCodeChallenge(codeVerifier);
-    
+
     return crypto.timingSafeEqual(
       Buffer.from(computedChallenge),
       Buffer.from(codeChallenge),
@@ -29,10 +33,7 @@ export class PkceService {
   }
 
   generateCodeChallenge(codeVerifier: string): string {
-    return crypto
-      .createHash('sha256')
-      .update(codeVerifier)
-      .digest('base64url');
+    return crypto.createHash('sha256').update(codeVerifier).digest('base64url');
   }
 
   generateAuthorizationCode(): string {

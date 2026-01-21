@@ -105,10 +105,7 @@ describe('ProjectsService - URL Validation Security Tests', () => {
 
       mockProjectRepository.findOne.mockResolvedValue(mockProject);
 
-      const result = await service.validateRedirectUrl(
-        'remixer',
-        'not-a-url',
-      );
+      const result = await service.validateRedirectUrl('remixer', 'not-a-url');
 
       expect(result).toBe(false);
     });

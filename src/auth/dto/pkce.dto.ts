@@ -16,7 +16,8 @@ export class SsoInitiateDto {
   @IsString()
   @IsNotEmpty()
   @Matches(/^[a-z0-9-]+$/, {
-    message: 'Project slug must contain only lowercase letters, numbers, and hyphens',
+    message:
+      'Project slug must contain only lowercase letters, numbers, and hyphens',
   })
   project: string;
 

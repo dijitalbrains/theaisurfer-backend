@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../../users/users.service';
+import { JwtPayload, UserPayload } from '../types/jwt-payload.interface';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -17,7 +18,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: any) {
+  async validate(payload: JwtPayload): Promise<UserPayload> {
     if (payload.type !== 'access') {
       throw new UnauthorizedException('Invalid token type');
     }
@@ -32,7 +33,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
-      projectSlug: payload.projectSlug,
+      projectSlug: payload.projectSlug ?? null,
     };
   }
 }

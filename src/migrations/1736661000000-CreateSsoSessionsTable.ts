@@ -1,4 +1,10 @@
-import { MigrationInterface, QueryRunner, Table, TableIndex, TableForeignKey } from 'typeorm';
+import {
+  MigrationInterface,
+  QueryRunner,
+  Table,
+  TableIndex,
+  TableForeignKey,
+} from 'typeorm';
 
 export class CreateSsoSessionsTable1736661000000 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -99,7 +105,7 @@ export class CreateSsoSessionsTable1736661000000 implements MigrationInterface {
         await queryRunner.dropForeignKey('sso_sessions', foreignKey);
       }
     }
-    
+
     await queryRunner.dropIndex('sso_sessions', 'IDX_sso_sessions_project_id');
     await queryRunner.dropIndex('sso_sessions', 'IDX_sso_sessions_expires_at');
     await queryRunner.dropTable('sso_sessions');

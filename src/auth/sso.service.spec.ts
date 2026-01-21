@@ -3,7 +3,6 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { SsoService } from './sso.service';
 import { SsoSession } from './entities/sso-session.entity';
 import { ProjectsService } from '../projects/projects.service';

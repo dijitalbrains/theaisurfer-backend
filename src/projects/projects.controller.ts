@@ -33,7 +33,8 @@ export class ProjectsController {
   @Get()
   @ApiOperation({
     summary: 'Get all active projects',
-    description: 'Returns a list of all active projects available in the system',
+    description:
+      'Returns a list of all active projects available in the system',
   })
   @ApiResponse({
     status: 200,
@@ -70,7 +71,8 @@ export class ProjectsController {
   @Get(':slug')
   @ApiOperation({
     summary: 'Get project by slug',
-    description: 'Retrieve detailed information about a specific project using its slug',
+    description:
+      'Retrieve detailed information about a specific project using its slug',
   })
   @ApiParam({
     name: 'slug',
@@ -160,6 +162,4 @@ export class ProjectsController {
   ) {
     return this.projectsService.update(slug, updateProjectDto);
   }
-
 }
-
