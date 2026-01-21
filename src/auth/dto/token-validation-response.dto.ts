@@ -21,6 +21,6 @@ export class TokenValidationResponseDto {
   @ApiProperty({ type: TokenValidationUserDto })
   user: TokenValidationUserDto;
 
-  @ApiProperty({ required: false })
-  projectSlug?: string;
+  @ApiProperty({ required: false, nullable: true })
+  projectSlug?: string | null;
 }
